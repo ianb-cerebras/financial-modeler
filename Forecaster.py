@@ -198,10 +198,10 @@ def populate_template(values: Dict[str, float], dest_path: str, sheet_name: str)
     ws = wb[sheet_name]
 
     for cell, num in values.items():
-        if cell in ws:
+        try:
             ws[cell].value = num
-        else:
-            logger.debug("Skipping value for non-existent cell %s", cell)
+        except ValueError:
+            logger.debug("Skipping invalid cell coordinate %s", cell)
 
     wb.save(dest_path)
     logger.info("Populated %d values into sheet '%s'", len(values), sheet_name)
