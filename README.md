@@ -1,55 +1,124 @@
-## Excel AI Finance Runner
+# Excel AI Financial Forecaster
 
-A finance analysis tool powered by Cererbas. It reads your Excel workbook, calls an AI planner, deterministically evaluates numbers, and can write results back to the model and export a polished report.
+A Python-driven workflow that turns a raw Excel workbook into a five-year projected Income Statement in seconds using a Cerebras LLM for assumption extraction and a deterministic formula engine for all math.
 
-### Status
-- Early working version. A release with stronger output validation and nicer model formatting is coming soon.
+---
 
-### What it does (today)
-- Load all sheets from an `.xlsx` workbook
-- AI planning via Cerebras (e.g., formulas or numeric plans)
-- Deterministic evaluation in Python
-- Optional write-back to the "Operating Model" sheet
-- Optional logging and console output
+## 1.  Key Features
 
-### Coming soon
-- Automatic validation of outputs (balance checks, sanity rules)
-- Cleaner, more consistent model formatting and layout
-- Richer document/report generation
-- Adaptive 
+* **LLM-assisted assumption extraction**  – No hard-coding of cell addresses. The model scans the workbook and returns a JSON dict of drivers (`base_revenue`, `sg&a_percent`, etc.).
+* **Deterministic calculation layer**  – All math is executed locally in Python, guaranteeing replicable numbers and full auditability.
+* **Template-agnostic cell routing**  – `LABEL_TO_ROW` maps semantic labels ("revenue", "cogs", …) to row numbers, while `FORECAST_COLUMNS` picks the start column. Change either to fit any template.
+* **One-command run**  – `python forecaster.py` loads the workbook, talks to the model, evaluates numbers, writes results, and prints a runtime summary.
+* **Non-destructive**  – Before writing, the script copies the formatted template sheet (`incomestatementformat.xlsx`) into the source workbook, so original data remain intact.
 
-## Quickstart
-1) Requirements
-- Python 3.9+
-- An environment variable `CEREBRAS_API_KEY` set with a valid key
+---
 
-2) Install dependencies
+## 2.  Repository Layout
+
+```text
+excel/
+├── Forecaster.py           # Main pipeline
+├── incomestatementformat.xlsx  # Clean template sheet copied into every run
+├── dummydata.xlsx          # Sample input workbook
+├── instructions.json       # Domain rules / formula guidance for the LLM
+├── venv/ …
+└── README.md               # You are here
+```
+
+---
+
+## 3.  Quick-Start
+
+### 3-1  Prerequisites
+
+* Python ≥ 3.9
+* `pip install -r requirements.txt` (see below)
+* Environment variable `CEREBRAS_API_KEY` containing your cloud API key
+
+### 3-2  Install deps
+
 ```bash
-pip install openpyxl python-docx cerebras-cloud-sdk pandas numpy
+python -m venv venv && source venv/bin/activate
+pip install openpyxl python-docx cerebras-cloud-sdk
 ```
 
-3) Run (AI-driven finance runner)
+### 3-3  Run
+
 ```bash
-python ai_finance_runner.py /path/to/workbook.xlsx "Your question here" --debug --log
-# Add --write to write computed numbers back into the workbook
+cd excel
+python Forecaster.py            # Prompts for a question (press Enter for default)
 ```
 
-Notes:
-- Avoid committing secrets. Use `CEREBRAS_API_KEY` from your shell or a secrets manager.
-- Large or sensitive workbooks should be sanitized before sharing.
+You will see console output like:
 
-## Repo hygiene (suggested)
-- Exclude virtual envs, caches, and temp files:
 ```
-venv/
-__pycache__/
-~$*
-*.env
+--- Calling identify_assumptions ---
+AI assumptions raw response: …
+Parsed assumptions dict: …
+--- Computing 5-year forecast locally ---
+Forecast values dict: …
+Updated dummydata.xlsx with formatted sheet Income Statement
+Total AI + projection runtime: 7.42 seconds
 ```
 
-## Roadmap highlights
-- Validation: more robust balance-sheet checks and cross-statement consistency
-- Formatting: improved Excel write-back (styles, headers, alignment) and better .docx reports
-- Performance: tighter prompts and faster evaluation
+Open `dummydata.xlsx` → sheet **Income Statement** to see the filled numbers.
 
-If you have a tricky model you want supported, open an issue with a redacted sample.
+---
+
+## 4.  How It Works
+
+1. **Load Workbook**  All sheets are converted to Python lists (`load_excel_data`).
+2. **Identify Assumptions**  `identify_assumptions()` sends workbook JSON + rules to the LLM → returns a flat dict of drivers.
+3. **Parse & Compute**  `compute_forecast()` turns the drivers into five-year arrays for every P&L line.
+4. **Route to Cells**  Rows picked via `LABEL_TO_ROW`; columns via `FORECAST_COLUMNS` (currently B–F → Years 1-5).
+5. **Copy Template**  First sheet of `incomestatementformat.xlsx` is cloned into the source workbook (name: *Income Statement*).
+6. **Populate & Review**  Numbers are written; a final LLM pass (`last_check`) flags any presentation issues.
+7. **Timing**  Total runtime is printed at the end.
+
+---
+
+## 5.  Customising
+
+### 5-1  Change Template Rows / Columns
+
+* Update `LABEL_TO_ROW` at the top of **Forecaster.py** – shift row numbers or add aliases.
+* Update `FORECAST_COLUMNS` (default `["B","C","D","E","F"]`).
+
+### 5-2  Add a New Line Item
+
+1. Add a calculation in `compute_forecast()` that returns a 5-element list.
+2. Insert it into `series_map` with an appropriate label.
+3. Map that label to a row in `LABEL_TO_ROW`.
+
+### 5-3  Extra Drivers
+
+Add keys to the assumptions prompt and extend `compute_forecast()` accordingly. Anything not returned defaults to zero, so iterating is safe.
+
+---
+
+## 6.  Troubleshooting
+
+| Symptom | Likely Cause | Fix |
+|---------|--------------|-----|
+| Interest rows all zeros | No cash / debt balance found | Add labelled balances or let model back-solve from Interest Expense. |
+| Numbers in wrong rows | Row not in `LABEL_TO_ROW` | Add mapping or correct label spelling. |
+| Template missing | Ensure `incomestatementformat.xlsx` exists and has the desired formatting. |
+| Runtime error in LLM call | Check `CEREBRAS_API_KEY`, internet, or retry. |
+
+---
+
+## 7.  Security & Privacy
+
+No workbook data leave your machine except the JSON payload sent to the Cerebras API. If your workbook is highly sensitive, redact or anonymise before use.
+
+---
+
+## 8.  Roadmap
+
+* Balance-Sheet & Cash-Flow projections
+* Scenario manager (best / base / downside)
+* CLI flags for headless / batch processing
+* CI test harness with sample workbooks
+
+Contributions welcome – open an issue or PR!

@@ -569,6 +569,9 @@ def main() -> None:
     """Run the forecasting pipeline writing results back into the source workbook."""
     user_question = input("Enter analysis question (or press Enter for default): ") or None
 
+    import time as _time
+    t_start = _time.perf_counter()
+
     wb_data = load_excel_data(SOURCE_FILE)
 
     # Load modeling rules so the LLM follows strict sign discipline
@@ -606,7 +609,9 @@ def main() -> None:
         combined.update(sheet_dict)
 
     populate_template(combined, SOURCE_FILE, tmpl_sheet)
+    t_end = _time.perf_counter()
     print("\nUpdated", SOURCE_FILE, "with formatted sheet", tmpl_sheet)
+    print(f"Total AI + projection runtime: {t_end - t_start:.2f} seconds")
 
 
 if __name__ == "__main__":
