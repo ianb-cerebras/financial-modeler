@@ -16,34 +16,34 @@ SOURCE_FILE = "dummydata.xlsx"  # primary data workbook to read and write
 # Hard-coded row/label mapping (aliases all point to the same row number)
 LABEL_TO_ROW: Dict[str, int] = {
     # Revenue
-    "revenue": 5,
-    "revenues": 5,
+    "revenue": 3,
+    "revenues": 3,
 
     # COGS / cost of sales
-    "cogs": 6,
-    "cost of goods sold": 6,
+    "cogs": 4,
+    "cost of goods sold": 4,
 
     # Gross profit
-    "gross profit": 7,
+    "gross profit": 5,
 
     # SG&A
-    "sg&a": 8,
-    "sg and a": 8,
-    "selling, general & administrative": 8,
+    "sg&a": 6,
+    "sg and a": 6,
+    "selling, general & administrative": 6,
 
     # D&A
-    "d&a": 9,
-    "depreciation & amortization": 9,
+    "d&a": 7,
+    "depreciation & amortization": 7,
 
     # Interest
-    "interest income": 10,
-    "ebit": 11,
+    "interest income": 8,
+    "ebit": 9,
 
     # Profit before tax / taxes / net income
-    "interest expense": 12,
-    "profit before taxes": 13,
-    "profit before tax": 13,
-    "net income": 14,
+    "interest expense": 10,
+    "profit before taxes": 11,
+    "profit before tax": 11,
+    "net income": 12,
 }
 
 logger = logging.getLogger(__name__)
@@ -135,6 +135,13 @@ def identify_assumptions(workbook_data: Dict[str, Any], core_elements: Optional[
         "  • cash_interest_rate               # decimal\n"
         "  • debt_interest_rate               # decimal\n"
         "  • effective_tax_rate               # decimal\n\n"
+        "Guidance:\n"
+        "• The source workbook may label these drivers differently. Map synonymous labels to the keys above.\n"
+        "    – Map any of: 'cash', 'cash balance', 'cash & equivalents', 'average cash', 'cash bal' to average_cash_balance.\n"
+        "    – Map any of: 'debt', 'total debt', 'average debt', 'lt debt', 'long-term debt', 'revolver balance' to average_debt_balance.\n"
+        "    – If interest rates appear by instrument (e.g., 'revolver rate', 'term loan rate'), choose the main corporate borrowing rate for debt_interest_rate.\n"
+        "• If the workbook already shows a calculated Interest Expense line, back-solve the implied average_debt_balance = interest_expense / debt_interest_rate.\n"
+        "• Use the best available numeric evidence; if multiple candidates exist, prefer the one closest to the current year.\n\n"
         "Rules:\n"
         "• If a value is missing, set it to 0 (do NOT fabricate).\n"
         "• Return ONLY valid JSON. No commentary or code fences.\n"
@@ -186,7 +193,7 @@ def parse_assumptions(json_text: str) -> Dict[str, Any]:
 # Hard-coded forecast engine
 # ---------------------------------------------------------------------------
 
-FORECAST_COLUMNS = ["E", "F", "G", "H", "I"]  # years 1-5
+FORECAST_COLUMNS = ["B", "C", "D", "E", "F"]  # years 1-5 starting at column B
 
 
 def _series_5y(base: float, growth: float) -> List[float]:
@@ -294,7 +301,7 @@ def values_from_json(json_text: str, row_mapping: Dict[str, int] = LABEL_TO_ROW)
     data = json.loads(json_text)
     out: Dict[str, Dict[str, float]] = {}
 
-    forecast_columns = ["E", "F", "G", "H", "I"]  # 5-year span
+    forecast_columns = ["B", "C", "D", "E", "F"]  # 5-year span
 
     # create a normalised lookup once so aliases with punctuation map correctly
     normalised_map = {re.sub(r"[^a-z% ]", "", k.lower()).strip(): v for k, v in row_mapping.items()}
