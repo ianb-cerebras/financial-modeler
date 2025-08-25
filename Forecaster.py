@@ -133,9 +133,12 @@ def identify_assumptions(workbook_data: Dict[str, Any], core_elements: Optional[
 
 def make_formulas(workbook_data: Dict[str, Any], template_structure: Dict[str, str], core_elements: Optional[str] = None, question: Optional[str] = None) -> str:
     """Cerebras call – return row-based calculations using template structure."""
+    extra_rules = f"\nCalculation rules (JSON):\n{core_elements}\n" if core_elements else ""
+
     system_prompt = (
         "You are a senior financial analyst creating a 5-year financial model. "
         f"Use this template structure: {template_structure}\n\n"
+        f"{extra_rules}"
         "Return a JSON array where each object has: row_label, values.\n"
         "The **values** field must be an array with FIVE entries – one for each forecast year 2023-2027, in order.\n\n"
         "• Each entry may be a literal number or, for derived rows, an arithmetic expression built only from numeric literals and + - * / ( ).\n"
@@ -148,7 +151,6 @@ def make_formulas(workbook_data: Dict[str, Any], template_structure: Dict[str, s
     context = {
         "workbook": workbook_data,
         "template_structure": template_structure,
-        "core_elements": core_elements,
         "question": question or "Create a 5-year financial forecast",
     }
     messages = [
@@ -376,6 +378,58 @@ def last_check(workbook_values: Dict[str, Dict[str, float]], summary_question: O
     ]
     return _chat_with_retries(messages, purpose="final_review")
 
+# ---------------------------------------------------------------------------
+# Formatting auto-fix helper
+# ---------------------------------------------------------------------------
+
+def apply_formatting_fixes(review_text: str, workbook_path: str, sheet_name: str = "Income Statement") -> None:
+    """Parse the LLM review for simple cell-level edits and apply them.
+
+    Expected edit lines of the form:
+      • SheetName | Cell | NewValue
+    or
+      • Cell | NewValue   (sheet inferred)
+
+    Anything that cannot be parsed is ignored silently.
+    If you see any data that is clearly wrong on the projection page, such as a missed decimal place, correct that too.
+    This is deliberately conservative so the model can only tweak explicit cells.
+    """
+    import re
+    edits = []
+    pattern = re.compile(r"(?P<sheet>[A-Za-z0-9 _]+)?\s*\|\s*(?P<cell>[A-Za-z]+[0-9]+)\s*\|\s*(?P<value>.+)")
+    for line in review_text.splitlines():
+        m = pattern.search(line)
+        if m:
+            sheet = m.group("sheet") or sheet_name
+            cell = m.group("cell").strip()
+            new_val = m.group("value").strip()
+            edits.append((sheet, cell, new_val))
+
+    if not edits:
+        print("No actionable formatting edits parsed from review.")
+        return
+
+    wb = openpyxl.load_workbook(workbook_path)
+    applied = 0
+    for sheet, cell, new_val in edits:
+        if sheet not in wb.sheetnames:
+            print(f"Skip unknown sheet {sheet} in edit {sheet}|{cell}")
+            continue
+        ws = wb[sheet]
+        try:
+            # attempt to convert numeric strings to float
+            if re.fullmatch(r"-?\d+(\.\d+)?", new_val):
+                ws[cell].value = float(new_val)
+            else:
+                ws[cell].value = new_val
+            applied += 1
+        except ValueError:
+            print(f"Invalid cell coordinate in edit {sheet}|{cell}")
+
+    if applied:
+        wb.save(workbook_path)
+        print(f"Applied {applied} formatting fixes as suggested by the model.")
+
 
 # ---------------------------------------------------------------------------
 # Command-line entrypoint
@@ -401,6 +455,10 @@ def main() -> None:
 
     review = last_check(values)
     print("\nAI review:\n", review)
+
+    if "PASS" not in review.upper():
+        apply_formatting_fixes(review, SOURCE_FILE, tmpl_sheet)
+        print("Re-ran formatting fixes based on model suggestions.")
 
     # Step: ensure template sheet exists in source workbook
     tmpl_sheet = copy_template_sheet("incomestatementformat.xlsx", SOURCE_FILE, "Income Statement")

@@ -1,0 +1,109 @@
+{
+  "5_year_projection_calculations": [
+    {
+      "name": "Modeling Rules (Read First)",
+      "definition": "Sign discipline and guardrails for expression generation.",
+      "formulas": [
+        "Treat expenses as negative in expressions. Do not add expenses to profits.",
+        "Never compute Interest Expense as a % of Revenue. Use debt balances only.",
+        "Exclude principal repayments from Interest Expense.",
+        "Gross Profit must be Revenue - COGS (subtract, do not add).",
+        "EBIT must be Gross Profit - SG&A - D&A (subtract both).",
+        "Net Income identity: Revenue - COGS - SG&A - D&A + Interest Income - Interest Expense - Tax Expense",
+        "If an input is unavailable (e.g., debt balance), return 0 for that row rather than making it revenue-based."
+      ]
+    },
+    {
+      "name": "Revenue",
+      "definition": "Total income generated from sales of goods or services.",
+      "formulas": [
+        "Revenue = Units Sold * Price per Unit",
+        "Revenue_t = Revenue_(t-1) * (1 + Growth Rate)"
+      ]
+    },
+    {
+      "name": "COGS (Cost of Goods Sold)",
+      "definition": "Direct costs of producing goods/services sold.",
+      "formulas": [
+        "COGS = Revenue * COGS%",
+        "COGS = Units Sold * Cost per Unit"
+      ]
+    },
+    {
+      "name": "Gross Profit",
+      "definition": "Profit after deducting direct production costs. SUBTRACT COGS DO NOT ADD",
+      "formulas": [
+        "Gross Profit = Revenue - COGS",
+        "Example: if Revenue=997.5 and COGS=650.975 then Gross Profit = 997.5 - 650.975"
+      ]
+    },
+    {
+      "name": "Gross Margin (%)",
+      "definition": "Gross profit as a percentage of revenue.",
+      "formulas": [
+        "Gross Margin% = Gross Profit ÷ Revenue"
+      ]
+    },
+    {
+      "name": "SG&A (Selling, General & Administrative Expenses)",
+      "definition": "Operating expenses not directly tied to production. Treat as an expense (negative in expressions).",
+      "formulas": [
+        "SG&A = -Revenue * SG&A%",
+        "SG&A = -(Fixed Costs + (Variable Rate * Revenue))"
+      ]
+    },
+
+    {
+      "name": "D&A (Depreciation & Amortization)",
+      "definition": "Non-cash expense. Treat as an expense (negative in expressions).",
+      "formulas": [
+        "D&A = -Revenue * D&A%",
+        "D&A = -Depreciation Schedule Total"
+      ]
+    },
+    {
+      "name": "EBIT (Earnings Before Interest & Taxes)",
+      "definition": "Operating profit before financing and tax. Subtract SG&A and D&A.",
+      "formulas": [
+        "EBIT = Gross Profit - SG&A - D&A"
+      ]
+    },
+    {
+      "name": "Interest Income",
+      "definition": "Earnings from cash balances or investments.",
+      "formulas": [
+        "Interest Income = Average Cash Balance * Interest Rate"
+      ]
+    },
+    {
+      "name": "Interest Expense",
+      "definition": "Cost of debt financing. Exclude principal repayments; never compute as a % of Revenue.",
+      "formulas": [
+        "Interest Expense = Average Debt Balance * Interest Rate",
+        "If debt balance is unavailable, set Interest Expense = 0"
+      ]
+    },
+    {
+      "name": "Profit Before Taxes (EBT)",
+      "definition": "Profit before income tax is deducted.",
+      "formulas": [
+        "EBT = EBIT + Interest Income - Interest Expense"
+      ]
+    },
+    {
+      "name": "Tax Expenses",
+      "definition": "Income taxes owed on pre-tax profit. If EBT <= 0, set Tax Expense = 0.",
+      "formulas": [
+        "Tax Expense = EBT * Effective Tax Rate"
+      ]
+    },
+    {
+      "name": "Net Income",
+      "definition": "Bottom-line profit after all expenses and taxes.",
+      "formulas": [
+        "Net Income = EBT - Tax Expense",
+        "Net Income = Revenue - COGS - SG&A - D&A + Interest Income - Interest Expense - Tax Expense"
+      ]
+    }
+  ]
+}
