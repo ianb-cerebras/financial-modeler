@@ -12,7 +12,42 @@ import random
 # ---------------- User configurable paths ----------------
 SOURCE_FILE = "test.xlsx"  # primary data workbook to read and write
 
+# Hard-coded row mapping for Income Statement template
+ROW_MAPPING = {
+    "Revenue": "6",
+    "COGS": "7",
+    "Gross Profit": "8",
+    "Gross Margin %": "9",
+    "SG&A": "10",
+    "EBIT": "11",
+    "Interest Income": "12",
+    "Interest Expense": "13",
+    "Profit Before Tax": "14",
+    "Tax Expense": "15",
+    "Net Income": "16",
+}
+
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Template structure extraction
+# ---------------------------------------------------------------------------
+def extract_template_structure(template_path: str) -> Dict[str, str]:
+    """Extract row labels and their cell coordinates from template."""
+    wb = openpyxl.load_workbook(template_path)
+    ws = wb.worksheets[0]
+    structure = {}
+
+    # Look for row labels in column A (assuming labels are in column A)
+    for row in range(1, 50):  # Check first 50 rows
+        cell = ws[f"A{row}"]
+        if cell.value and isinstance(cell.value, str) and cell.value.strip():
+            label = cell.value.strip()
+            # Map to the data column (E) for the same row
+            structure[label] = f"E{row}"
+
+    logger.info("Extracted template structure: %s", structure)
+    return structure
 
 # ---------------------------------------------------------------------------
 # Global Cerebras client & model configuration
@@ -60,8 +95,9 @@ def _chat_with_retries(messages: List[Dict[str, Any]], *, purpose: str, max_retr
 def identify_assumptions(workbook_data: Dict[str, Any], core_elements: Optional[str] = None, question: Optional[str] = None) -> str:
     """Cerebras call – extract numeric data & assumptions from raw workbook."""
     system_prompt = (
-        "You are a financial analyst. Given the core elements and raw workbook data, "
+        "You are a financial analyst. Given the core elements and raw workbook data for P&L forecasting. "
         "extract specific financial information and all underlying assumptions required for modelling."
+        "Do not do any modeling, and prepare all potentially relevant information for modeling (P&L)"
     )
     context = {
         "workbook": workbook_data,
@@ -75,18 +111,27 @@ def identify_assumptions(workbook_data: Dict[str, Any], core_elements: Optional[
     return _chat_with_retries(messages, purpose="identify_assumptions")
 
 
-def make_formulas(workbook_data: Dict[str, Any], core_elements: Optional[str] = None, question: Optional[str] = None) -> str:
-    """Cerebras call – return numeric literals per cell, no cell references."""
+def make_formulas(workbook_data: Dict[str, Any], template_structure: Dict[str, str], core_elements: Optional[str] = None, question: Optional[str] = None) -> str:
+    """Cerebras call – return row-based calculations using template structure."""
     system_prompt = (
-        "You are a senior financial analyst. Using ONLY numeric literals, provide the values to populate the template. "
-        "Return a JSON array where each object has keys: sheet, cell, value.  Example: "
-        "[{\"sheet\": \"Income Statement\", \"cell\": \"C12\", \"value\": 22}]. "
-        "Do NOT reference any other cells or sheets; compute everything beforehand."
+        "You are a senior financial analyst creating a 5-year financial model. "
+        f"Use this template structure: {template_structure}\n\n"
+        "Return a JSON array where each object has: row_label, value.\n\n"
+        "• If the value is a direct input (e.g., historical revenue) you may put the literal number.\n"
+        "• If the value is **derived** (e.g., COGS = Revenue * 0.6, Gross Profit = Revenue – COGS, margins, etc.) "
+        "return an arithmetic expression built ONLY from numeric literals and the four operators + - * / and parentheses.\n\n"
+        "Examples:\n"
+        "  {\"row_label\":\"Revenue\",\"value\":1050}\n"
+        "  {\"row_label\":\"COGS\",\"value\":\"1050*0.6\"}\n"
+        "  {\"row_label\":\"Gross Profit\",\"value\":\"1050-630\"}\n\n"
+        "IMPORTANT: Include all rows: Revenue, COGS, Gross Profit, Gross Margin %, SG&A, D&A, EBIT, EBIT Margin %, Interest Income, Interest Expense, Profit Before Tax, Tax Expense, Net Income.\n"
+        "Do NOT evaluate the expressions."
     )
     context = {
         "workbook": workbook_data,
+        "template_structure": template_structure,
         "core_elements": core_elements,
-        "question": question or "Analyze the financial performance and provide key insights",
+        "question": question or "Create a 5-year financial forecast",
     }
     messages = [
         {"role": "system", "content": system_prompt},
@@ -98,29 +143,44 @@ def make_formulas(workbook_data: Dict[str, Any], core_elements: Optional[str] = 
 # ---------------------------------------------------------------------------
 # Formula evaluation engine
 # ---------------------------------------------------------------------------
-def values_from_json(json_text: str) -> Dict[str, Dict[str, float]]:
-    """Convert model JSON (sheet, cell, value) into nested dict."""
+def values_from_json(json_text: str, row_mapping: Dict[str, str]) -> Dict[str, Dict[str, float]]:
+    """Convert row-based JSON into cell-based nested dict using row mapping."""
     import json, numbers
     data = json.loads(json_text)
     out: Dict[str, Dict[str, float]] = {}
+    
+    # Define the columns for 5-year forecast (E, F, G, H, I for 2023-2027)
+    forecast_columns = ['E', 'F', 'G', 'H', 'I']
+    
     for obj in data:
-        sheet = obj["sheet"]
-        cell = obj["cell"]
+        row_label = obj["row_label"]
         val = obj["value"]
-        origin = "AI literal"
+        
+        # Map row label to row number
+        if row_label not in row_mapping:
+            print(f"Skipped unknown row label: {row_label}")
+            continue
+        
+        row_num = row_mapping[row_label]
+        sheet = "Income Statement"  # Default sheet name
+        
         if isinstance(val, str):
-            origin = "Python eval"
-            print(f"Evaluating expression for {sheet} {cell}: {val}")
+            print(f"Evaluating expression for {row_label} (row {row_num}): {val}")
             val = float(eval(val, {"__builtins__": {}}))
             print(f"Result -> {val}")
         elif isinstance(val, numbers.Number):
-            print(f"Literal number for {sheet} {cell}: {val}")
+            print(f"Literal number for {row_label} (row {row_num}): {val}")
             val = float(val)
         else:
-            print(f"Skipped unsupported value for {sheet} {cell}: {val}")
+            print(f"Skipped unsupported value for {row_label}: {val}")
             continue
-        out.setdefault(sheet, {})[cell] = val
-    print("\nCompleted values_from_json; total cells processed:", sum(len(d) for d in out.values()))
+        
+        # Populate across all forecast columns with the same value
+        for col in forecast_columns:
+            cell = f"{col}{row_num}"
+            out.setdefault(sheet, {})[cell] = val
+    
+    print(f"\nCompleted values_from_json; total cells processed: {sum(len(d) for d in out.values())}")
     return out
 
 
@@ -254,7 +314,7 @@ def insert_values_sheet(values: Dict[str, float], workbook_path: str, sheet_titl
 
     wb.save(workbook_path)
     logger.info("Inserted %d values into sheet '%s' of %s", len(values), sheet_title, workbook_path)
-    
+
 
 # ---------------------------------------------------------------------------
 # Final AI review helper
@@ -282,7 +342,7 @@ def last_check(workbook_values: Dict[str, Dict[str, float]], summary_question: O
         {"role": "user", "content": json.dumps(context)},
     ]
     return _chat_with_retries(messages, purpose="final_review")
-    
+
 
 # ---------------------------------------------------------------------------
 # Command-line entrypoint
@@ -298,10 +358,11 @@ def main() -> None:
     print("AI assumptions response:\n", assumptions)
 
     print("\n--- Calling make_formulas ---")
-    formulas_json = make_formulas(wb_data, None, user_question)
+    template_structure = extract_template_structure("incomestatementformat.xlsx")
+    formulas_json = make_formulas(wb_data, template_structure, None, user_question)
     print("Raw formulas JSON:\n", formulas_json)
 
-    values = values_from_json(formulas_json)
+    values = values_from_json(formulas_json, ROW_MAPPING)
     print("\nParsed numeric values:")
     print(values)
 
