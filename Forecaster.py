@@ -136,17 +136,14 @@ def make_formulas(workbook_data: Dict[str, Any], template_structure: Dict[str, s
     system_prompt = (
         "You are a senior financial analyst creating a 5-year financial model. "
         f"Use this template structure: {template_structure}\n\n"
-        "Return a JSON array where each object has: row_label, value.\n\n"
-        "• If the value is a direct input (e.g., historical revenue) you may put the literal number.\n"
-        "• If the value is **derived** (e.g., COGS = Revenue * 0.6, Gross Profit = Revenue – COGS, margins, etc.) "
-        "return an arithmetic expression built ONLY from numeric literals and the four operators + - * / and parentheses.\n\n"
-        "Examples:\n"
-        "  {\"row_label\":\"Revenue\",\"value\":1050}\n"
-        "  {\"row_label\":\"COGS\",\"value\":\"1050*0.6\"}\n"
-        "  {\"row_label\":\"Gross Profit\",\"value\":\"1050-630\"}\n\n"
+        "Return a JSON array where each object has: row_label, values.\n"
+        "The **values** field must be an array with FIVE entries – one for each forecast year 2023-2027, in order.\n\n"
+        "• Each entry may be a literal number or, for derived rows, an arithmetic expression built only from numeric literals and + - * / ( ).\n"
+        "• Do NOT reference other cells and do NOT evaluate the expressions yourself.\n\n"
+        "Example object:\n"
+        "  {\"row_label\": \"Revenue\", \"values\": [1000, \"1000*1.05\", \"1000*1.05*1.05\", \"...\", \"...\"]}\n\n"
         "IMPORTANT: Include all rows: Revenue, COGS, Gross Profit, Gross Margin %, SG&A, D&A, EBIT, EBIT Margin %, Interest Income, Interest Expense, Profit Before Tax, Tax Expense, Net Income.\n"
-        "Provide values for the first year (2023) - the system will automatically populate across all 5 years.\n"
-        "Do NOT evaluate the expressions."
+        "Return ONLY valid JSON. Do not add commentary."
     )
     context = {
         "workbook": workbook_data,
@@ -173,35 +170,48 @@ def values_from_json(json_text: str, row_mapping: Dict[str, int] = LABEL_TO_ROW)
 
     forecast_columns = ["E", "F", "G", "H", "I"]  # 5-year span
 
+    # create a normalised lookup once so aliases with punctuation map correctly
+    normalised_map = {re.sub(r"[^a-z% ]", "", k.lower()).strip(): v for k, v in row_mapping.items()}
+
     for obj in data:
-        raw_label = obj["row_label"]
-        val = obj["value"]
+        raw_label = obj.get("row_label")
+        vals = obj.get("values")
+
+        if raw_label is None or vals is None:
+            print(f"Skipping object missing fields: {obj}")
+            continue
+
+        if len(vals) != 5:
+            print(f"Expected 5 values for {raw_label}, got {len(vals)} – skipping")
+            continue
 
         # normalise label for lookup
         label = re.sub(r"[^a-z% ]", "", raw_label.lower()).strip()
-        if label not in row_mapping:
+        if label not in normalised_map:
             print(f"Skipped unknown row label: {raw_label}")
             continue
 
-        row_num = row_mapping[label]
+        row_num = normalised_map[label]
         sheet = "Income Statement"
 
-        try:
-            if isinstance(val, str):
-                print(f"Evaluating expression for {raw_label} (row {row_num}): {val}")
-                val = float(eval(val, {"__builtins__": {}}))
-            elif isinstance(val, numbers.Number):
-                val = float(val)
-            else:
-                print(f"Unsupported value type for {raw_label}: {val}")
+        for i, col in enumerate(forecast_columns):
+            val = vals[i]
+            try:
+                if isinstance(val, str):
+                    expr = val.replace("^", "**")  # allow power operator
+                    print(f"Evaluating expression for {raw_label} {col} (row {row_num}): {expr}")
+                    num = float(eval(expr, {"__builtins__": {}}))
+                elif isinstance(val, numbers.Number):
+                    num = float(val)
+                else:
+                    print(f"Unsupported value type for {raw_label} {col}: {val}")
+                    continue
+            except Exception as e:
+                print(f"Failed to eval {raw_label} {col}: {e}; skipping cell")
                 continue
-        except Exception as e:
-            print(f"Failed to evaluate expression for {raw_label}: {e}; skipping")
-            continue
 
-        for col in forecast_columns:
             cell = f"{col}{row_num}"
-            out.setdefault(sheet, {})[cell] = val
+            out.setdefault(sheet, {})[cell] = num
 
     print(f"Completed values_from_json; total cells processed: {sum(len(d) for d in out.values())}")
     return out
