@@ -8,23 +8,43 @@ from docx import Document  # pip install python-docx
 import time
 import logging
 import random
+import re
 
 # ---------------- User configurable paths ----------------
 SOURCE_FILE = "test.xlsx"  # primary data workbook to read and write
 
-# Hard-coded row mapping for Income Statement template
-ROW_MAPPING = {
-    "Revenue": "6",
-    "COGS": "7",
-    "Gross Profit": "8",
-    "Gross Margin %": "9",
-    "SG&A": "10",
-    "EBIT": "11",
-    "Interest Income": "12",
-    "Interest Expense": "13",
-    "Profit Before Tax": "14",
-    "Tax Expense": "15",
-    "Net Income": "16",
+# Hard-coded row/label mapping (aliases all point to the same row number)
+LABEL_TO_ROW: Dict[str, int] = {
+    # Revenue
+    "revenue": 5,
+    "revenues": 5,
+
+    # COGS / cost of sales
+    "cogs": 6,
+    "cost of goods sold": 6,
+
+    # Gross profit
+    "gross profit": 7,
+
+    # SG&A
+    "sg&a": 8,
+    "sg and a": 8,
+    "selling, general & administrative": 8,
+
+    # D&A
+    "d&a": 9,
+    "depreciation & amortization": 9,
+
+    # Interest
+    "interest income": 10,
+    "interest expense": 11,
+
+    # Profit before tax / taxes / net income
+    "profit before tax": 12,
+    "profit before taxes": 12,
+    "tax expense": 13,
+    "tax expenses": 13,
+    "net income": 14,
 }
 
 logger = logging.getLogger(__name__)
@@ -125,6 +145,7 @@ def make_formulas(workbook_data: Dict[str, Any], template_structure: Dict[str, s
         "  {\"row_label\":\"COGS\",\"value\":\"1050*0.6\"}\n"
         "  {\"row_label\":\"Gross Profit\",\"value\":\"1050-630\"}\n\n"
         "IMPORTANT: Include all rows: Revenue, COGS, Gross Profit, Gross Margin %, SG&A, D&A, EBIT, EBIT Margin %, Interest Income, Interest Expense, Profit Before Tax, Tax Expense, Net Income.\n"
+        "Provide values for the first year (2023) - the system will automatically populate across all 5 years.\n"
         "Do NOT evaluate the expressions."
     )
     context = {
@@ -143,44 +164,46 @@ def make_formulas(workbook_data: Dict[str, Any], template_structure: Dict[str, s
 # ---------------------------------------------------------------------------
 # Formula evaluation engine
 # ---------------------------------------------------------------------------
-def values_from_json(json_text: str, row_mapping: Dict[str, str]) -> Dict[str, Dict[str, float]]:
-    """Convert row-based JSON into cell-based nested dict using row mapping."""
-    import json, numbers
+def values_from_json(json_text: str, row_mapping: Dict[str, int] = LABEL_TO_ROW) -> Dict[str, Dict[str, float]]:
+    """Convert row-based JSON into cell-based nested dict using the label alias mapping."""
+    import json, numbers, re
+
     data = json.loads(json_text)
     out: Dict[str, Dict[str, float]] = {}
-    
-    # Define the columns for 5-year forecast (E, F, G, H, I for 2023-2027)
-    forecast_columns = ['E', 'F', 'G', 'H', 'I']
-    
+
+    forecast_columns = ["E", "F", "G", "H", "I"]  # 5-year span
+
     for obj in data:
-        row_label = obj["row_label"]
+        raw_label = obj["row_label"]
         val = obj["value"]
-        
-        # Map row label to row number
-        if row_label not in row_mapping:
-            print(f"Skipped unknown row label: {row_label}")
+
+        # normalise label for lookup
+        label = re.sub(r"[^a-z% ]", "", raw_label.lower()).strip()
+        if label not in row_mapping:
+            print(f"Skipped unknown row label: {raw_label}")
             continue
-        
-        row_num = row_mapping[row_label]
-        sheet = "Income Statement"  # Default sheet name
-        
-        if isinstance(val, str):
-            print(f"Evaluating expression for {row_label} (row {row_num}): {val}")
-            val = float(eval(val, {"__builtins__": {}}))
-            print(f"Result -> {val}")
-        elif isinstance(val, numbers.Number):
-            print(f"Literal number for {row_label} (row {row_num}): {val}")
-            val = float(val)
-        else:
-            print(f"Skipped unsupported value for {row_label}: {val}")
+
+        row_num = row_mapping[label]
+        sheet = "Income Statement"
+
+        try:
+            if isinstance(val, str):
+                print(f"Evaluating expression for {raw_label} (row {row_num}): {val}")
+                val = float(eval(val, {"__builtins__": {}}))
+            elif isinstance(val, numbers.Number):
+                val = float(val)
+            else:
+                print(f"Unsupported value type for {raw_label}: {val}")
+                continue
+        except Exception as e:
+            print(f"Failed to evaluate expression for {raw_label}: {e}; skipping")
             continue
-        
-        # Populate across all forecast columns with the same value
+
         for col in forecast_columns:
             cell = f"{col}{row_num}"
             out.setdefault(sheet, {})[cell] = val
-    
-    print(f"\nCompleted values_from_json; total cells processed: {sum(len(d) for d in out.values())}")
+
+    print(f"Completed values_from_json; total cells processed: {sum(len(d) for d in out.values())}")
     return out
 
 
@@ -362,7 +385,7 @@ def main() -> None:
     formulas_json = make_formulas(wb_data, template_structure, None, user_question)
     print("Raw formulas JSON:\n", formulas_json)
 
-    values = values_from_json(formulas_json, ROW_MAPPING)
+    values = values_from_json(formulas_json)
     print("\nParsed numeric values:")
     print(values)
 
