@@ -1,7 +1,7 @@
 import os
 import json
 import argparse
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 import openpyxl
 from cerebras.cloud.sdk import Cerebras
 from docx import Document  # pip install python-docx
@@ -10,9 +10,7 @@ import logging
 import random
 
 # ---------------- User configurable paths ----------------
-SOURCE_FILE = "test.xlsx"
-TEMPLATE_FILE = "incomestatementformat.xlsx"
-OUTPUT_FILE = "incomestatementformat_filled.xlsx"
+SOURCE_FILE = "test.xlsx"  # primary data workbook to read and write
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +57,7 @@ def _chat_with_retries(messages: List[Dict[str, Any]], *, purpose: str, max_retr
 # ---------------------------------------------------------------------------
 # AI-assisted analytics steps
 # ---------------------------------------------------------------------------
-def identify_assumptions(workbook_data: Dict[str, Any], core_elements: str | None = None, question: str | None = None) -> str:
+def identify_assumptions(workbook_data: Dict[str, Any], core_elements: Optional[str] = None, question: Optional[str] = None) -> str:
     """Cerebras call – extract numeric data & assumptions from raw workbook."""
     system_prompt = (
         "You are a financial analyst. Given the core elements and raw workbook data, "
@@ -77,7 +75,7 @@ def identify_assumptions(workbook_data: Dict[str, Any], core_elements: str | Non
     return _chat_with_retries(messages, purpose="identify_assumptions")
 
 
-def make_formulas(workbook_data: Dict[str, Any], core_elements: str | None = None, question: str | None = None) -> str:
+def make_formulas(workbook_data: Dict[str, Any], core_elements: Optional[str] = None, question: Optional[str] = None) -> str:
     """Cerebras call – generate spreadsheet-style formulas or literal numbers for template filling."""
     system_prompt = (
         "You are a senior financial analyst. Based on the extracted core elements, generate **numeric** Excel-style "
@@ -151,7 +149,7 @@ def evaluate_formulas(workbook_data: Dict[str, List[List[Any]]], formulas_json: 
     return out
 
 
-def fill_template(values: Dict[str, Dict[str, float]], template_path: str, output_path: str | None = None) -> str:
+def fill_template(values: Dict[str, Dict[str, float]], template_path: str, output_path: Optional[str] = None) -> str:
     """Insert evaluated numbers into an Excel template.
 
     Args:
@@ -211,7 +209,7 @@ def insert_values_sheet(values: Dict[str, float], workbook_path: str, sheet_titl
 # ---------------------------------------------------------------------------
 # Final AI review helper
 # ---------------------------------------------------------------------------
-def last_check(workbook_values: Dict[str, Dict[str, float]], summary_question: str | None = None) -> str:
+def last_check(workbook_values: Dict[str, Dict[str, float]], summary_question: Optional[str] = None) -> str:
     """Ask the model to review the filled data and flag any issues.
 
     Args:
@@ -240,16 +238,20 @@ def last_check(workbook_values: Dict[str, Dict[str, float]], summary_question: s
 # Command-line entrypoint
 # ---------------------------------------------------------------------------
 def main() -> None:
-    """Run the forecasting pipeline using hard-coded file paths above."""
+    """Run the forecasting pipeline writing results back into the source workbook."""
     wb_data = load_excel_data(SOURCE_FILE)
     formulas_json = make_formulas(wb_data, None)
     values = evaluate_formulas(wb_data, formulas_json)
     review = last_check(values)
     print("AI review:\n", review)
-    filled_path = fill_template(values, TEMPLATE_FILE, OUTPUT_FILE)
-    print("Filled workbook written to", filled_path)
+
+    # Write each sheet's values back into the same workbook under a new sheet name
+    for sheet_name, cell_map in values.items():
+        output_sheet = f"{sheet_name}_Model" if sheet_name in wb_data else sheet_name
+        insert_values_sheet(cell_map, SOURCE_FILE, output_sheet)
+
+    print("Updated", SOURCE_FILE, "with model output sheets.")
 
 
 if __name__ == "__main__":
     main()
-    
