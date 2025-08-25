@@ -76,11 +76,12 @@ def identify_assumptions(workbook_data: Dict[str, Any], core_elements: Optional[
 
 
 def make_formulas(workbook_data: Dict[str, Any], core_elements: Optional[str] = None, question: Optional[str] = None) -> str:
-    """Cerebras call – generate spreadsheet-style formulas or literal numbers for template filling."""
+    """Cerebras call – return numeric literals per cell, no cell references."""
     system_prompt = (
-        "You are a senior financial analyst. Based on the extracted core elements, generate **numeric** Excel-style "
-        "formulas or literal values that populate the target template. Return **only** a JSON array of objects with "
-        "keys: sheet, cell, formula. Do not include commentary. Use expressions like 'A12-B12', not words."
+        "You are a senior financial analyst. Using ONLY numeric literals, provide the values to populate the template. "
+        "Return a JSON array where each object has keys: sheet, cell, value.  Example: "
+        "[{\"sheet\": \"Income Statement\", \"cell\": \"C12\", \"value\": 22}]. "
+        "Do NOT reference any other cells or sheets; compute everything beforehand."
     )
     context = {
         "workbook": workbook_data,
@@ -97,54 +98,22 @@ def make_formulas(workbook_data: Dict[str, Any], core_elements: Optional[str] = 
 # ---------------------------------------------------------------------------
 # Formula evaluation engine
 # ---------------------------------------------------------------------------
-def evaluate_formulas(workbook_data: Dict[str, List[List[Any]]], formulas_json: str) -> Dict[str, Dict[str, float]]:
-    """Turn JSON formulas into numeric values using in-memory evaluation."""
-    import re, string
-    value_map: Dict[tuple[str, str], float] = {}
-    for sheet, matrix in workbook_data.items():
-        for r, row in enumerate(matrix, start=1):
-            for c, val in enumerate(row, start=1):
-                if isinstance(val, (int, float)) and val is not None:
-                    col_letter = string.ascii_uppercase[c - 1]
-                    value_map[(sheet, f"{col_letter}{r}")] = float(val)
-
-    cell_re = re.compile(r"\b([A-Z]+[0-9]+)\b")
-
-    formulas = json.loads(formulas_json)
-
-    remaining = formulas.copy()
-    progress = True
-    while remaining and progress:
-        progress = False
-        for f in remaining[:]:
-            key = (f["sheet"], f["cell"])
-            expr = f["formula"]
-            unresolved = False
-
-            def sub(m):
-                ref = (f["sheet"], m.group(1))
-                nonlocal unresolved
-                if ref in value_map:
-                    return str(value_map[ref])
-                unresolved = True
-                return m.group(0)
-
-            expr_sub = cell_re.sub(sub, expr)
-            if unresolved:
-                continue
-            try:
-                value_map[key] = float(eval(expr_sub, {"__builtins__": {}}, {}))
-                remaining.remove(f)
-                progress = True
-            except Exception as e:
-                logger.warning("Failed to eval formula %s=%s: %s", key, expr_sub, e)
-                remaining.remove(f)
-
-    if remaining:
-        logger.warning("%d formulas could not be resolved due to missing dependencies.", len(remaining))
-
+def values_from_json(json_text: str) -> Dict[str, Dict[str, float]]:
+    """Convert model JSON (sheet, cell, value) into nested dict."""
+    import json, numbers
+    data = json.loads(json_text)
     out: Dict[str, Dict[str, float]] = {}
-    for (sheet, cell), val in value_map.items():
+    for obj in data:
+        sheet = obj["sheet"]
+        cell = obj["cell"]
+        val = obj["value"]
+        if isinstance(val, str):
+            # Allow simple literal expressions like "1000*0.1"
+            val = float(eval(val, {"__builtins__": {}}))
+        elif isinstance(val, numbers.Number):
+            val = float(val)
+        else:
+            continue
         out.setdefault(sheet, {})[cell] = val
     return out
 
@@ -164,10 +133,22 @@ def fill_template(values: Dict[str, Dict[str, float]], template_path: str, outpu
 
     wb = openpyxl.load_workbook(template_path)
 
+    missing_refs = []
     for sheet_name, cell_map in values.items():
-        ws = wb[sheet_name] if sheet_name in wb.sheetnames else wb.create_sheet(sheet_name)
+        if sheet_name not in wb.sheetnames:
+            missing_refs.append((sheet_name, None))
+            continue  # skip unknown sheet
+        ws = wb[sheet_name]
         for cell, num in cell_map.items():
+            try:
+                ws[cell]  # trigger coordinate parsing
+            except ValueError:
+                missing_refs.append((sheet_name, cell))
+                continue
             ws[cell] = num
+
+    if missing_refs:
+        logger.warning("Skipped %d references not present in template: %s", len(missing_refs), missing_refs[:20])
 
     if output_path is None:
         p = Path(template_path)
@@ -176,6 +157,54 @@ def fill_template(values: Dict[str, Dict[str, float]], template_path: str, outpu
     wb.save(output_path)
     logger.info("Template filled and saved to %s", output_path)
     return output_path
+
+
+# ---------------------------------------------------------------------------
+# Template sheet handling
+# ---------------------------------------------------------------------------
+def copy_template_sheet(template_path: str, dest_path: str, new_sheet_name: Optional[str] = None) -> str:
+    """Copy the first sheet from template workbook into destination workbook.
+
+    Overwrites any existing sheet with the same name.
+    Returns the sheet name used.
+    """
+    tpl_wb = openpyxl.load_workbook(template_path, data_only=True)
+    tpl_ws = tpl_wb.worksheets[0]
+    target_name = new_sheet_name or tpl_ws.title
+
+    dest_wb = openpyxl.load_workbook(dest_path)
+    # Remove existing sheet with that name to ensure fresh copy
+    if target_name in dest_wb.sheetnames:
+        std = dest_wb[target_name]
+        dest_wb.remove(std)
+
+    new_ws = dest_wb.create_sheet(title=target_name)
+
+    # Copy cell values (styles not critical for basic numbers)
+    for row in tpl_ws.iter_rows(values_only=False):
+        for cell in row:
+            new_ws[cell.coordinate].value = cell.value
+
+    dest_wb.save(dest_path)
+    logger.info("Copied template sheet '%s' into %s", target_name, dest_path)
+    return target_name
+
+
+def populate_template(values: Dict[str, float], dest_path: str, sheet_name: str) -> None:
+    """Write numbers into existing sheet, only where coordinates already exist."""
+    wb = openpyxl.load_workbook(dest_path)
+    if sheet_name not in wb.sheetnames:
+        raise ValueError(f"Sheet {sheet_name} not found in {dest_path}")
+    ws = wb[sheet_name]
+
+    for cell, num in values.items():
+        if cell in ws:
+            ws[cell].value = num
+        else:
+            logger.debug("Skipping value for non-existent cell %s", cell)
+
+    wb.save(dest_path)
+    logger.info("Populated %d values into sheet '%s'", len(values), sheet_name)
 
 
 # ---------------------------------------------------------------------------
@@ -219,9 +248,9 @@ def last_check(workbook_values: Dict[str, Dict[str, float]], summary_question: O
         Model response containing either 'All good' or suggestions/corrections.
     """
     system_prompt = (
-        "You are an auditing financial analyst. Review the following structured workbook data. "
-        "Identify any glaring inconsistencies, missing pieces, or calculation errors. "
-        "If everything is reasonable, respond with 'PASS'. Otherwise, list the issues found and recommend corrections."
+        "You are a formatting auditor. Examine the structured workbook data intended for presentation. "
+        "Check for alignment with standard financial-model formatting: correct headers, year columns, sourceline totals, consistent decimal places, and logical ordering. "
+        "If everything is presentation-ready, respond with 'PASS'. Otherwise, list the formatting issues and specify the exact cell edits required to fix them (sheet, cell, new_value or action)."
     )
     context = {
         "values": workbook_values,
@@ -239,18 +268,35 @@ def last_check(workbook_values: Dict[str, Dict[str, float]], summary_question: O
 # ---------------------------------------------------------------------------
 def main() -> None:
     """Run the forecasting pipeline writing results back into the source workbook."""
+    user_question = input("Enter analysis question (or press Enter for default): ") or None
+
     wb_data = load_excel_data(SOURCE_FILE)
-    formulas_json = make_formulas(wb_data, None)
-    values = evaluate_formulas(wb_data, formulas_json)
+
+    print("\n--- Calling identify_assumptions ---")
+    assumptions = identify_assumptions(wb_data, None, user_question)
+    print("AI assumptions response:\n", assumptions)
+
+    print("\n--- Calling make_formulas ---")
+    formulas_json = make_formulas(wb_data, None, user_question)
+    print("Raw formulas JSON:\n", formulas_json)
+
+    values = values_from_json(formulas_json)
+    print("\nParsed numeric values:")
+    print(values)
+
     review = last_check(values)
-    print("AI review:\n", review)
+    print("\nAI review:\n", review)
 
-    # Write each sheet's values back into the same workbook under a new sheet name
-    for sheet_name, cell_map in values.items():
-        output_sheet = f"{sheet_name}_Model" if sheet_name in wb_data else sheet_name
-        insert_values_sheet(cell_map, SOURCE_FILE, output_sheet)
+    # Step: ensure template sheet exists in source workbook
+    tmpl_sheet = copy_template_sheet("incomestatementformat.xlsx", SOURCE_FILE, "Income Statement")
 
-    print("Updated", SOURCE_FILE, "with model output sheets.")
+    # Merge all values and populate
+    combined: Dict[str, float] = {}
+    for sheet_dict in values.values():
+        combined.update(sheet_dict)
+
+    populate_template(combined, SOURCE_FILE, tmpl_sheet)
+    print("\nUpdated", SOURCE_FILE, "with formatted sheet", tmpl_sheet)
 
 
 if __name__ == "__main__":
