@@ -1,6 +1,6 @@
 ## Excel AI Finance Runner
 
-An early working prototype aiming to be the fastest financial model processor. It reads your Excel workbook, calls an AI planner, deterministically evaluates numbers, and can write results back to the model and export a polished report.
+A finance analysis tool powered by Cererbas. It reads your Excel workbook, calls an AI planner, deterministically evaluates numbers, and can write results back to the model and export a polished report.
 
 ### Status
 - Early working version. A release with stronger output validation and nicer model formatting is coming soon.
