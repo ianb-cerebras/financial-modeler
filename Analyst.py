@@ -1,4 +1,6 @@
 """
+NOT IN USE ARCHIVED IGNORE
+
 Three-Stage Cerebras AI Financial Data Processor
 
 This script processes Excel financial data through 3 sequential Cerebras AI calls:

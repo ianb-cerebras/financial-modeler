@@ -10,8 +10,11 @@ import logging
 import random
 import re
 
+#This is a non-deterministic forecaster version of the main model. This version has the task of building the formulas itself. 
+# This is more flexible but also quality can vary. Use at your own risk (or just have fun)!
+
 # ---------------- User configurable paths ----------------
-SOURCE_FILE = "dummydata.xlsx"  # primary data workbook to read and write
+SOURCE_FILE = "YOUR_FILEest.xlsx"  # primary data workbook to read and write
 
 # Hard-coded row/label mapping (aliases all point to the same row number)
 LABEL_TO_ROW: Dict[str, int] = {
@@ -37,12 +40,13 @@ LABEL_TO_ROW: Dict[str, int] = {
 
     # Interest
     "interest income": 10,
-    "ebit": 11,
+    "interest expense": 11,
 
     # Profit before tax / taxes / net income
-    "interest expense": 12,
-    "profit before taxes": 13,
-    "profit before tax": 13,
+    "profit before tax": 12,
+    "profit before taxes": 12,
+    "tax expense": 13,
+    "tax expenses": 13,
     "net income": 14,
 }
 
@@ -113,36 +117,15 @@ def _chat_with_retries(messages: List[Dict[str, Any]], *, purpose: str, max_retr
 # ---------------------------------------------------------------------------
 def identify_assumptions(workbook_data: Dict[str, Any], core_elements: Optional[str] = None, question: Optional[str] = None) -> str:
     """Cerebras call – extract numeric data & assumptions from raw workbook."""
-    # ------------------------------------------------------------------
-    # The model’s job is ONLY to find the raw inputs (assumptions) that
-    # the hard-coded forecast engine will later consume.  We therefore ask
-    # for a single JSON object named "assumptions" whose keys exactly
-    # match the list agreed with the user.
-    # ------------------------------------------------------------------
     system_prompt = (
-        "You are a financial analyst. Your ONLY task: scan the raw workbook data and "
-        "return a JSON object named assumptions that contains the following keys – ALL in lower-case, "
-        "spaces replaced with underscores, and units in plain numbers (no formatting):\n\n"
-        "  • base_revenue                    # starting revenue dollar amount\n"
-        "  • revenue_growth_rate             # as decimal e.g. 0.05 for 5 %\n"
-        "  • base_cogs_percent              # starting COGS % of revenue (decimal)\n"
-        "  • cogs_delta_per_year            # annual increase in COGS % (decimal)\n"
-        "  • sg&a_percent                     # decimal (negative not required)\n"
-        "  • d&a_percent                      # decimal (negative not required)\n"
-        "  • average_cash_balance\n"
-        "  • average_debt_balance\n"
-         " • EBIT\n"
-        "  • cash_interest_rate               # decimal\n"
-        "  • debt_interest_rate               # decimal\n"
-        "  • effective_tax_rate               # decimal\n\n"
-        "Rules:\n"
-        "• If a value is missing, set it to 0 (do NOT fabricate).\n"
-        "• Return ONLY valid JSON. No commentary or code fences.\n"
+        "You are a financial analyst. Given the core elements and raw workbook data for P&L forecasting. "
+        "extract specific financial information and all underlying assumptions required for modelling."
+        "Do not do any modeling, and prepare all potentially relevant information for modeling (P&L)"
     )
     context = {
         "workbook": workbook_data,
         "core_elements": core_elements,
-        "question": question or "Extract the assumptions listed above from the workbook",
+        "question": question or "Analyze the financial performance and provide key insights",
     }
     messages = [
         {"role": "system", "content": system_prompt},
@@ -151,137 +134,33 @@ def identify_assumptions(workbook_data: Dict[str, Any], core_elements: Optional[
     return _chat_with_retries(messages, purpose="identify_assumptions")
 
 
-# ---------------------------------------------------------------------------
-# Assumption parsing helper
-# ---------------------------------------------------------------------------
+def make_formulas(workbook_data: Dict[str, Any], template_structure: Dict[str, str], core_elements: Optional[str] = None, question: Optional[str] = None) -> str:
+    """Cerebras call – return row-based calculations using template structure."""
+    extra_rules = f"\nCalculation rules (JSON):\n{core_elements}\n" if core_elements else ""
 
-def parse_assumptions(json_text: str) -> Dict[str, Any]:
-    """Parse the assumptions JSON returned by the LLM.
-
-    The LLM is instructed to output a single JSON object.  It may either be
-    the assumptions object itself or an outer object with the key
-    "assumptions".  This helper normalises both cases.
-    """
-    import json as _json
-
-    try:
-        data = _json.loads(json_text)
-    except Exception as e:  # noqa: BLE001
-        logger.error("Failed to parse assumptions JSON: %s", e)
-        return {}
-
-    # If the model wrapped the assumptions in an outer object, unwrap it.
-    if isinstance(data, dict) and "assumptions" in data and isinstance(data["assumptions"], dict):
-        return data["assumptions"]
-
-    # Otherwise assume the dict itself *is* the assumptions mapping.
-    if isinstance(data, dict):
-        return data
-
-    logger.error("Unexpected JSON structure for assumptions – expected dict, got %s", type(data).__name__)
-    return {}
-
-
-# ---------------------------------------------------------------------------
-# Hard-coded forecast engine
-# ---------------------------------------------------------------------------
-
-FORECAST_COLUMNS = ["E", "F", "G", "H", "I"]  # years 1-5
-
-
-def _series_5y(base: float, growth: float) -> List[float]:
-    """Return five-year series given base value and constant growth rate."""
-    return [base * (1 + growth) ** i for i in range(5)]
-
-
-def compute_forecast(assumptions: Dict[str, Any]) -> Dict[str, Dict[str, float]]:
-    """Compute 5-year P&L using hard-coded formulas guided by instructions.json.
-
-    Args:
-        assumptions: mapping returned by parse_assumptions(). Must contain the
-            keys defined in the updated prompt.
-
-    Returns:
-        Nested dict: {sheet_name: {cell: value}}
-    """
-    # Extract inputs with defaults to 0 if missing.
-    a = lambda k: float(assumptions.get(k, 0) or 0)  # noqa: E731
-
-    base_revenue = a("base_revenue")
-    growth_rate = a("revenue_growth_rate")
-
-    base_cogs_pct = a("base_cogs_percent")
-    cogs_delta = a("cogs_delta_per_year")
-    sgna_pct = a("sg&a_percent")
-    da_pct = a("d&a_percent")
-
-    avg_cash = a("average_cash_balance")
-    avg_debt = a("average_debt_balance")
-
-    cash_rate = a("cash_interest_rate")
-    debt_rate = a("debt_interest_rate")
-
-    tax_rate = a("effective_tax_rate")
-
-    # Revenue series
-    revenue_series = _series_5y(base_revenue, growth_rate)
-
-    # Cost of goods sold – COGS % increases by fixed delta each year
-    cogs_pct_series = [base_cogs_pct + cogs_delta * i for i in range(5)]
-    cogs_series = [rev * pct for rev, pct in zip(revenue_series, cogs_pct_series)]
-
-    # Gross profit
-    gp_series = [rev - cogs for rev, cogs in zip(revenue_series, cogs_series)]
-
-    # SG&A and D&A (expenses as positive numbers for now)
-    sgna_series = [rev * sgna_pct for rev in revenue_series]
-    da_series = [rev * da_pct for rev in revenue_series]
-
-    # EBIT
-    ebit_series = [gp - sgna - da for gp, sgna, da in zip(gp_series, sgna_series, da_series)]
-
-    # Interest income/expense
-    int_income_series = [avg_cash * cash_rate for _ in range(5)]
-    int_expense_series = [avg_debt * debt_rate for _ in range(5)]
-
-    # Profit before tax (EBT)
-    ebt_series = [ebit + ii - ie for ebit, ii, ie in zip(ebit_series, int_income_series, int_expense_series)]
-
-    # Tax expense (0 if negative EBT)
-    tax_series = [ebt * tax_rate if ebt > 0 else 0 for ebt in ebt_series]
-
-    # Net income
-    ni_series = [ebt - tax for ebt, tax in zip(ebt_series, tax_series)]
-
-    # Build output dict
-    row_map = LABEL_TO_ROW
-    sheet = "Income Statement"
-    out: Dict[str, Dict[str, float]] = {sheet: {}}
-
-    series_map = {
-        "revenue": revenue_series,
-        "cogs": cogs_series,
-        "gross profit": gp_series,
-        "sg&a": sgna_series,
-        "d&a": da_series,
-        "ebit": ebit_series,
-        "interest income": int_income_series,
-        "interest expense": int_expense_series,
-        "profit before tax": ebt_series,
-        "tax expense": tax_series,
-        "net income": ni_series,
+    system_prompt = (
+        "You are a senior financial analyst creating a 5-year financial model. "
+        f"Use this template structure: {template_structure}\n\n"
+        f"{extra_rules}"
+        "Return a JSON array where each object has: row_label, values.\n"
+        "The **values** field must be an array with FIVE entries – one for each forecast year 2023-2027, in order.\n\n"
+        "• Each entry may be a literal number or, for derived rows, an arithmetic expression built only from numeric literals and + - * / ( ).\n"
+        "• Do NOT reference other cells and do NOT evaluate the expressions yourself.\n\n"
+        "Example object:\n"
+        "  {\"row_label\": \"Revenue\", \"values\": [1000, \"1000*1.05\", \"1000*1.05*1.05\", \"...\", \"...\"]}\n\n"
+        "IMPORTANT: Include all rows: Revenue, COGS, Gross Profit, Gross Margin %, SG&A, D&A, EBIT, EBIT Margin %, Interest Income, Interest Expense, Profit Before Tax, Tax Expense, Net Income.\n"
+        "Return ONLY valid JSON. Do not add commentary."
+    )
+    context = {
+        "workbook": workbook_data,
+        "template_structure": template_structure,
+        "question": question or "Create a 5-year financial forecast",
     }
-
-    for label, series in series_map.items():
-        if label not in row_map:
-            continue
-        row_num = row_map[label]
-        for idx, col in enumerate(FORECAST_COLUMNS):
-            cell = f"{col}{row_num}"
-            out[sheet][cell] = series[idx]
-
-    logger.info("Computed forecast with %d cells", len(out[sheet]))
-    return out
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": json.dumps(context)},
+    ]
+    return _chat_with_retries(messages, purpose="generate_formulas")
 
 
 # ---------------------------------------------------------------------------
@@ -573,15 +452,17 @@ def main() -> None:
         core_rules = None
 
     print("\n--- Calling identify_assumptions ---")
-    assumptions_text = identify_assumptions(wb_data, core_rules, user_question)
-    print("AI assumptions raw response:\n", assumptions_text)
+    assumptions = identify_assumptions(wb_data, core_rules, user_question)
+    print("AI assumptions response:\n", assumptions)
 
-    assumptions = parse_assumptions(assumptions_text)
-    print("\nParsed assumptions dict:\n", assumptions)
+    print("\n--- Calling make_formulas ---")
+    template_structure = extract_template_structure("incomestatementformat.xlsx")
+    formulas_json = make_formulas(wb_data, template_structure, core_rules, user_question)
+    print("Raw formulas JSON:\n", formulas_json)
 
-    print("\n--- Computing 5-year forecast locally ---")
-    values = compute_forecast(assumptions)
-    print("Forecast values dict:\n", values)
+    values = values_from_json(formulas_json)
+    print("\nParsed numeric values:")
+    print(values)
 
     # Ensure template sheet exists before any potential formatting edits
     tmpl_sheet = copy_template_sheet("incomestatementformat.xlsx", SOURCE_FILE, "Income Statement")
