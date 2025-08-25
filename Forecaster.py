@@ -107,14 +107,20 @@ def values_from_json(json_text: str) -> Dict[str, Dict[str, float]]:
         sheet = obj["sheet"]
         cell = obj["cell"]
         val = obj["value"]
+        origin = "AI literal"
         if isinstance(val, str):
-            # Allow simple literal expressions like "1000*0.1"
+            origin = "Python eval"
+            print(f"Evaluating expression for {sheet} {cell}: {val}")
             val = float(eval(val, {"__builtins__": {}}))
+            print(f"Result -> {val}")
         elif isinstance(val, numbers.Number):
+            print(f"Literal number for {sheet} {cell}: {val}")
             val = float(val)
         else:
+            print(f"Skipped unsupported value for {sheet} {cell}: {val}")
             continue
         out.setdefault(sheet, {})[cell] = val
+    print("\nCompleted values_from_json; total cells processed:", sum(len(d) for d in out.values()))
     return out
 
 
@@ -180,10 +186,25 @@ def copy_template_sheet(template_path: str, dest_path: str, new_sheet_name: Opti
 
     new_ws = dest_wb.create_sheet(title=target_name)
 
-    # Copy cell values (styles not critical for basic numbers)
-    for row in tpl_ws.iter_rows(values_only=False):
+    # Copy dimensions (column widths)
+    for col_dim in tpl_ws.column_dimensions.values():
+        new_ws.column_dimensions[col_dim.column_letter].width = col_dim.width
+    for row_dim in tpl_ws.row_dimensions.values():
+        new_ws.row_dimensions[row_dim.index].height = row_dim.height
+
+    # Copy cell values and basic styles
+    from copy import copy as _copy
+    for row in tpl_ws.iter_rows():
         for cell in row:
-            new_ws[cell.coordinate].value = cell.value
+            new_cell = new_ws[cell.coordinate]
+            new_cell.value = cell.value
+            if cell.has_style:
+                new_cell.font = _copy(cell.font)
+                new_cell.border = _copy(cell.border)
+                new_cell.fill = _copy(cell.fill)
+                new_cell.number_format = _copy(cell.number_format)
+                new_cell.protection = _copy(cell.protection)
+                new_cell.alignment = _copy(cell.alignment)
 
     dest_wb.save(dest_path)
     logger.info("Copied template sheet '%s' into %s", target_name, dest_path)
