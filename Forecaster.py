@@ -201,7 +201,12 @@ def _series_5y(base: float, growth: float) -> List[float]:
     return [base * (1 + growth) ** i for i in range(5)]
 
 
-def compute_forecast(assumptions: Dict[str, Any]) -> Dict[str, Dict[str, float]]:
+def compute_forecast(
+    assumptions: Dict[str, Any],
+    *,
+    rows_map: Optional[Dict[str, int]] = None,
+    cols: Optional[List[str]] = None,
+) -> Dict[str, Dict[str, float]]:
     """Compute 5-year P&L using hard-coded formulas guided by instructions.json.
 
     Args:
@@ -261,8 +266,11 @@ def compute_forecast(assumptions: Dict[str, Any]) -> Dict[str, Dict[str, float]]
     ni_series = [ebt - tax for ebt, tax in zip(ebt_series, tax_series)]
 
     # Build output dict
-    row_map = LABEL_TO_ROW
     sheet = "Income Statement"
+    if rows_map is None:
+        rows_map = LABEL_TO_ROW
+    if cols is None:
+        cols = FORECAST_COLUMNS
     out: Dict[str, Dict[str, float]] = {sheet: {}}
 
     series_map = {
@@ -280,10 +288,10 @@ def compute_forecast(assumptions: Dict[str, Any]) -> Dict[str, Dict[str, float]]
     }
 
     for label, series in series_map.items():
-        if label not in row_map:
+        row_num = rows_map.get(label)
+        if not row_num:
             continue
-        row_num = row_map[label]
-        for idx, col in enumerate(FORECAST_COLUMNS):
+        for idx, col in enumerate(cols):
             cell = f"{col}{row_num}"
             out[sheet][cell] = series[idx]
 
@@ -563,6 +571,69 @@ def apply_formatting_fixes(review_text: str, workbook_path: str, sheet_name: str
 
 
 # ---------------------------------------------------------------------------
+# Sheet structure detection via LLM
+# ---------------------------------------------------------------------------
+
+
+TARGET_LABELS = [
+    "revenue",
+    "cogs",
+    "gross profit",
+    "sg&a",
+    "d&a",
+    "interest income",
+    "interest expense",
+    "profit before tax",
+    "tax expense",
+    "net income",
+]
+
+
+def detect_structure(workbook: Dict[str, List[List[Any]]]) -> Dict[str, Any]:
+    """Ask the LLM to locate row numbers and first forecast column.
+
+    Returns a dict {"start_column": "B", "rows": {label: row_num | None}}.
+    Raises RuntimeError if JSON cannot be parsed.
+    """
+    prompt = (
+        "You are a spreadsheet auditor. Given a worksheet dump (list of rows) "
+        "and a list of target P&L labels, find which ROW each label appears on.\n"
+        "Return JSON exactly in this format:\n\n"
+        "{\n  \"sheet_name\": \"<sheet>\",\n  \"start_column\": \"<letter>\",\n  \"rows\": { label: row_or_null }\n}\n\n"
+        "Rules:\n"
+        "• Match labels case-insensitively, ignore punctuation.& for SG&A etc. Exactly wording may differ.\n"
+        "• If a label is missing, set its value to null.\n"
+        "• start_column = the first completely empty column (rows 2-100 are empty)"
+        "  for the matched rows (so forecasts won't overwrite historicals).\n"
+        "• Do not include commentary – return only valid JSON."
+    )
+
+    context = {"workbook": workbook, "labels": TARGET_LABELS}
+
+    messages = [
+        {"role": "system", "content": prompt},
+        {"role": "user", "content": json.dumps(context)},
+    ]
+
+    resp = _chat_with_retries(messages, purpose="detect_structure")
+
+    try:
+        data = json.loads(resp)
+        assert all(k in data for k in ("sheet_name", "start_column", "rows"))
+        return data
+    except Exception as e:  # noqa: BLE001
+        raise RuntimeError(f"Failed to parse structure JSON: {e} – raw: {resp[:200]}") from e
+
+
+def col_sequence(start_col: str, n: int = 5) -> List[str]:
+    """Return a list of n sequential Excel column letters starting at start_col."""
+    from openpyxl.utils import column_index_from_string, get_column_letter
+
+    base_idx = column_index_from_string(start_col.upper())
+    return [get_column_letter(base_idx + i) for i in range(n)]
+
+
+# ---------------------------------------------------------------------------
 # Command-line entrypoint
 # ---------------------------------------------------------------------------
 def main() -> None:
@@ -573,6 +644,10 @@ def main() -> None:
     t_start = _time.perf_counter()
 
     wb_data = load_excel_data(SOURCE_FILE)
+
+    # Ask the model to find which sheet holds the P&L along with the structure
+    structure = detect_structure(wb_data)  # pass entire workbook
+    sheet_name = structure.get("sheet_name", "Income Statement")
 
     # Load modeling rules so the LLM follows strict sign discipline
     core_rules: Optional[str] = None
@@ -590,17 +665,21 @@ def main() -> None:
     print("\nParsed assumptions dict:\n", assumptions)
 
     print("\n--- Computing 5-year forecast locally ---")
-    values = compute_forecast(assumptions)
-    print("Forecast values dict:\n", values)
+    from openpyxl.utils import column_index_from_string, get_column_letter
 
-    # Ensure template sheet exists before any potential formatting edits
-    tmpl_sheet = copy_template_sheet("incomestatementformat.xlsx", SOURCE_FILE, "Income Statement")
+    detected_col = structure["start_column"]
+    start_idx = max(column_index_from_string(detected_col.upper()) - 1, 1)
+    cols = [get_column_letter(start_idx + i) for i in range(5)]
+    rows_map = {k: v for k, v in structure["rows"].items() if v}
+
+    values = compute_forecast(assumptions, rows_map=rows_map, cols=cols)
+    print("Forecast values dict:\n", values)
 
     review = last_check(values)
     print("\nAI review:\n", review)
 
     if "PASS" not in review.upper():
-        apply_formatting_fixes(review, SOURCE_FILE, tmpl_sheet)
+        apply_formatting_fixes(review, SOURCE_FILE, sheet_name)
         print("Re-ran formatting fixes based on model suggestions.")
 
     # Merge all values and populate
@@ -608,9 +687,9 @@ def main() -> None:
     for sheet_dict in values.values():
         combined.update(sheet_dict)
 
-    populate_template(combined, SOURCE_FILE, tmpl_sheet)
+    populate_template(combined, SOURCE_FILE, sheet_name)
     t_end = _time.perf_counter()
-    print("\nUpdated", SOURCE_FILE, "with formatted sheet", tmpl_sheet)
+    print("\nUpdated", SOURCE_FILE, "with formatted sheet", sheet_name)
     print(f"Total AI + projection runtime: {t_end - t_start:.2f} seconds")
 
 
