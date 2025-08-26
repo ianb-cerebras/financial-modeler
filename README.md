@@ -22,7 +22,8 @@ excel/
 ├── incomestatementformat.xlsx  # Clean template sheet copied into every run
 ├── dummydata.xlsx          # Sample input workbook
 ├── instructions.json       # Domain rules / formula guidance for the LLM
-├── venv/ …
+├── requirements.txt        # Python dependencies
+├── .gitignore             # Git ignore rules
 └── README.md               # You are here
 ```
 
@@ -40,7 +41,7 @@ excel/
 
 ```bash
 python -m venv venv && source venv/bin/activate
-pip install openpyxl python-docx cerebras-cloud-sdk
+pip install -r requirements.txt
 ```
 
 ### 3-3  Run
