@@ -1,72 +1,17 @@
 import os
 import json
-import argparse
 from typing import Dict, Any, List, Optional
 import openpyxl
 from cerebras.cloud.sdk import Cerebras
-from docx import Document  # pip install python-docx
 import time
 import logging
 import random
 import re
 
 # ---------------- User configurable paths ----------------
-SOURCE_FILE = "dummydata.xlsx"  # primary data workbook to read and write
-
-# Hard-coded row/label mapping (aliases all point to the same row number)
-LABEL_TO_ROW: Dict[str, int] = {
-    # Revenue
-    "revenue": 3,
-    "revenues": 3,
-
-    # COGS / cost of sales
-    "cogs": 4,
-    "cost of goods sold": 4,
-
-    # Gross profit
-    "gross profit": 5,
-
-    # SG&A
-    "sg&a": 6,
-    "sg and a": 6,
-    "selling, general & administrative": 6,
-
-    # D&A
-    "d&a": 7,
-    "depreciation & amortization": 7,
-
-    # Interest
-    "interest income": 8,
-    "ebit": 9,
-
-    # Profit before tax / taxes / net income
-    "interest expense": 10,
-    "profit before taxes": 11,
-    "profit before tax": 11,
-    "net income": 12,
-}
+SOURCE_FILE = "/Users/ianbaime/Desktop/dummydata.xlsx"  # primary data workbook to read and write
 
 logger = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# Template structure extraction
-# ---------------------------------------------------------------------------
-def extract_template_structure(template_path: str) -> Dict[str, str]:
-    """Extract row labels and their cell coordinates from template."""
-    wb = openpyxl.load_workbook(template_path)
-    ws = wb.worksheets[0]
-    structure = {}
-
-    # Look for row labels in column A (assuming labels are in column A)
-    for row in range(1, 50):  # Check first 50 rows
-        cell = ws[f"A{row}"]
-        if cell.value and isinstance(cell.value, str) and cell.value.strip():
-            label = cell.value.strip()
-            # Map to the data column (E) for the same row
-            structure[label] = f"E{row}"
-
-    logger.info("Extracted template structure: %s", structure)
-    return structure
 
 # ---------------------------------------------------------------------------
 # Global Cerebras client & model configuration
@@ -299,150 +244,16 @@ def compute_forecast(
     return out
 
 
-# ---------------------------------------------------------------------------
-# Formula evaluation engine
-# ---------------------------------------------------------------------------
-def values_from_json(json_text: str, row_mapping: Dict[str, int] = LABEL_TO_ROW) -> Dict[str, Dict[str, float]]:
-    """Convert row-based JSON into cell-based nested dict using the label alias mapping."""
-    import json, numbers, re
-
-    data = json.loads(json_text)
-    out: Dict[str, Dict[str, float]] = {}
-
-    forecast_columns = ["B", "C", "D", "E", "F"]  # 5-year span
-
-    # create a normalised lookup once so aliases with punctuation map correctly
-    normalised_map = {re.sub(r"[^a-z% ]", "", k.lower()).strip(): v for k, v in row_mapping.items()}
-
-    for obj in data:
-        raw_label = obj.get("row_label")
-        vals = obj.get("values")
-
-        if raw_label is None or vals is None:
-            print(f"Skipping object missing fields: {obj}")
-            continue
-
-        if len(vals) != 5:
-            print(f"Expected 5 values for {raw_label}, got {len(vals)} – skipping")
-            continue
-
-        # normalise label for lookup
-        label = re.sub(r"[^a-z% ]", "", raw_label.lower()).strip()
-        if label not in normalised_map:
-            print(f"Skipped unknown row label: {raw_label}")
-            continue
-
-        row_num = normalised_map[label]
-        sheet = "Income Statement"
-
-        for i, col in enumerate(forecast_columns):
-            val = vals[i]
-            try:
-                if isinstance(val, str):
-                    expr = val.replace("^", "**")  # allow power operator
-                    print(f"Evaluating expression for {raw_label} {col} (row {row_num}): {expr}")
-                    num = float(eval(expr, {"__builtins__": {}}))
-                elif isinstance(val, numbers.Number):
-                    num = float(val)
-                else:
-                    print(f"Unsupported value type for {raw_label} {col}: {val}")
-                    continue
-            except Exception as e:
-                print(f"Failed to eval {raw_label} {col}: {e}; skipping cell")
-                continue
-
-            cell = f"{col}{row_num}"
-            out.setdefault(sheet, {})[cell] = num
-
-    print(f"Completed values_from_json; total cells processed: {sum(len(d) for d in out.values())}")
-    return out
+# (Removed legacy JSON-to-values converter; not used in web flow)
 
 
-def fill_template(values: Dict[str, Dict[str, float]], template_path: str, output_path: Optional[str] = None) -> str:
-    """Insert evaluated numbers into an Excel template.
-
-    Args:
-        values: Nested dict from evaluate_formulas – sheet -> cell -> number.
-        template_path: Path to the template workbook (e.g. incomestatementformat.xlsx).
-        output_path: Where to save the filled workbook. If None, writes alongside template with suffix _filled.xlsx.
-
-    Returns:
-        The path to the written workbook.
-    """
-    from pathlib import Path
-
-    wb = openpyxl.load_workbook(template_path)
-
-    missing_refs = []
-    for sheet_name, cell_map in values.items():
-        if sheet_name not in wb.sheetnames:
-            missing_refs.append((sheet_name, None))
-            continue  # skip unknown sheet
-        ws = wb[sheet_name]
-        for cell, num in cell_map.items():
-            try:
-                ws[cell]  # trigger coordinate parsing
-            except ValueError:
-                missing_refs.append((sheet_name, cell))
-                continue
-            ws[cell] = num
-
-    if missing_refs:
-        logger.warning("Skipped %d references not present in template: %s", len(missing_refs), missing_refs[:20])
-
-    if output_path is None:
-        p = Path(template_path)
-        output_path = str(p.with_name(p.stem + "_filled" + p.suffix))
-
-    wb.save(output_path)
-    logger.info("Template filled and saved to %s", output_path)
-    return output_path
+# (Removed legacy template fill function; not used in web flow)
 
 
 # ---------------------------------------------------------------------------
 # Template sheet handling
 # ---------------------------------------------------------------------------
-def copy_template_sheet(template_path: str, dest_path: str, new_sheet_name: Optional[str] = None) -> str:
-    """Copy the first sheet from template workbook into destination workbook.
-
-    Overwrites any existing sheet with the same name.
-    Returns the sheet name used.
-    """
-    tpl_wb = openpyxl.load_workbook(template_path, data_only=True)
-    tpl_ws = tpl_wb.worksheets[0]
-    target_name = new_sheet_name or tpl_ws.title
-
-    dest_wb = openpyxl.load_workbook(dest_path)
-    # Remove existing sheet with that name to ensure fresh copy
-    if target_name in dest_wb.sheetnames:
-        std = dest_wb[target_name]
-        dest_wb.remove(std)
-
-    new_ws = dest_wb.create_sheet(title=target_name)
-
-    # Copy dimensions (column widths)
-    for col_dim in tpl_ws.column_dimensions.values():
-        new_ws.column_dimensions[col_dim.column_letter].width = col_dim.width
-    for row_dim in tpl_ws.row_dimensions.values():
-        new_ws.row_dimensions[row_dim.index].height = row_dim.height
-
-    # Copy cell values and basic styles
-    from copy import copy as _copy
-    for row in tpl_ws.iter_rows():
-        for cell in row:
-            new_cell = new_ws[cell.coordinate]
-            new_cell.value = cell.value
-            if cell.has_style:
-                new_cell.font = _copy(cell.font)
-                new_cell.border = _copy(cell.border)
-                new_cell.fill = _copy(cell.fill)
-                new_cell.number_format = _copy(cell.number_format)
-                new_cell.protection = _copy(cell.protection)
-                new_cell.alignment = _copy(cell.alignment)
-
-    dest_wb.save(dest_path)
-    logger.info("Copied template sheet '%s' into %s", target_name, dest_path)
-    return target_name
+# (Removed legacy template sheet copier; not used in web flow)
 
 
 def populate_template(values: Dict[str, float], dest_path: str, sheet_name: str) -> None:
@@ -468,26 +279,7 @@ def populate_template(values: Dict[str, float], dest_path: str, sheet_name: str)
 
 
 # new function for inserting into any workbook
-def insert_values_sheet(values: Dict[str, float], workbook_path: str, sheet_title: str) -> None:
-    """Create a new sheet and write cell->value mappings.
-
-    Args:
-        values: Flat dict of cell address -> number (e.g. {"A1": 10}).
-        workbook_path: Existing workbook file to modify.
-        sheet_title: Title for the new sheet.
-    """
-    wb = openpyxl.load_workbook(workbook_path)
-    if sheet_title in wb.sheetnames:
-        ws = wb[sheet_title]
-        logger.info("Overwriting existing sheet '%s' in %s", sheet_title, workbook_path)
-    else:
-        ws = wb.create_sheet(title=sheet_title)
-
-    for cell, num in values.items():
-        ws[cell] = num
-
-    wb.save(workbook_path)
-    logger.info("Inserted %d values into sheet '%s' of %s", len(values), sheet_title, workbook_path)
+# (Removed legacy utility to create new sheet; web flow writes into existing sheet)
 
 
 # ---------------------------------------------------------------------------
@@ -590,10 +382,10 @@ TARGET_LABELS = [
 ]
 
 
-def detect_structure(workbook: Dict[str, List[List[Any]]]) -> Dict[str, Any]:
+def detect_structure(workbook: Dict[str, List[List[Any]]]) -> Dict[str, Any]: #designed specifically for 5 year projections
     """Ask the LLM to locate row numbers and first forecast column.
 
-    Returns a dict {"start_column": "B", "rows": {label: row_num | None}}.
+    Returns a dict {"start_column": "B", "rows": {label: row_num | None}}. 
     Raises RuntimeError if JSON cannot be parsed.
     """
     prompt = (
