@@ -581,6 +581,7 @@ TARGET_LABELS = [
     "gross profit",
     "sg&a",
     "d&a",
+    "ebit",
     "interest income",
     "interest expense",
     "profit before tax",
@@ -601,7 +602,13 @@ def detect_structure(workbook: Dict[str, List[List[Any]]]) -> Dict[str, Any]:
         "Return JSON exactly in this format:\n\n"
         "{\n  \"sheet_name\": \"<sheet>\",\n  \"start_column\": \"<letter>\",\n  \"rows\": { label: row_or_null }\n}\n\n"
         "Rules:\n"
-        "• Match labels case-insensitively, ignore punctuation.& for SG&A etc. Exactly wording may differ.\n"
+        "• Match labels case-insensitively; ignore punctuation (%, &, ., -). Wording may differ.\n"
+        "• Map common synonyms to target keys:\n"
+        "    – 'Operating income' or 'Operating profit' → ebit\n"
+        "    – 'COGS' or 'Cost of goods sold' → cogs\n"
+        "    – 'SG&A' or 'Selling, general & administrative' → sg&a\n"
+        "    – 'D&A' or 'Depreciation & amortization' → d&a\n"
+        "    – 'EBT' or 'Profit before taxes' → profit before tax\n"
         "• If a label is missing, set its value to null.\n"
         "• start_column = the first completely empty column (rows 2-100 are empty)"
         "  for the matched rows (so forecasts won't overwrite historicals).\n"
