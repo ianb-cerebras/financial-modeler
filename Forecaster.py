@@ -190,7 +190,7 @@ def parse_assumptions(json_text: str) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Hard-coded forecast engine
+# Deterministic forecast engine
 # ---------------------------------------------------------------------------
 
 FORECAST_COLUMNS = ["B", "C", "D", "E", "F"]  # years 1-5 starting at column B
@@ -235,11 +235,11 @@ def compute_forecast(
 
     tax_rate = a("effective_tax_rate")
 
-    # Revenue series
-    revenue_series = _series_5y(base_revenue, growth_rate)
+    # Revenue series – Year 1 is first projection (after assumptions)
+    revenue_series = [base_revenue * (1 + growth_rate) ** (i + 1) for i in range(5)]
 
-    # Cost of goods sold – COGS % increases by fixed delta each year
-    cogs_pct_series = [base_cogs_pct + cogs_delta * i for i in range(5)]
+    # Cost of goods sold – COGS % increases by fixed delta each year starting in Year 1
+    cogs_pct_series = [base_cogs_pct + cogs_delta * (i + 1) for i in range(5)]
     cogs_series = [rev * pct for rev, pct in zip(revenue_series, cogs_pct_series)]
 
     # Gross profit
@@ -668,7 +668,7 @@ def main() -> None:
     from openpyxl.utils import column_index_from_string, get_column_letter
 
     detected_col = structure["start_column"]
-    start_idx = max(column_index_from_string(detected_col.upper()) - 1, 1)
+    start_idx = column_index_from_string(detected_col.upper())
     cols = [get_column_letter(start_idx + i) for i in range(5)]
     rows_map = {k: v for k, v in structure["rows"].items() if v}
 
